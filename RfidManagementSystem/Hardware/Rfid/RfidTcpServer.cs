@@ -17,7 +17,7 @@ public class RfidTcpServer
 
     public event Action<string>? StatusChanged;
     //public event Action<byte[]>? DataReceived;
-    public event Action<string, byte[]>? DataReceived;
+    public event Action<string, int, byte[]>? DataReceived;
 
     public async Task StartAsync(int port)
     {
@@ -112,12 +112,20 @@ public class RfidTcpServer
                     bytesRead
                 );
 
-                string readerIp =
-    ((IPEndPoint)client.Client.RemoteEndPoint!)
-    .Address
-    .ToString();
+                var remoteEndPoint =
+    (IPEndPoint)client.Client.RemoteEndPoint!;
 
-                DataReceived?.Invoke(readerIp, receivedData);
+                var localEndPoint =
+                    (IPEndPoint)client.Client.LocalEndPoint!;
+
+                string readerIp = remoteEndPoint.Address.ToString();
+                int serverPort = localEndPoint.Port;
+
+                DataReceived?.Invoke(
+                    readerIp,
+                    serverPort,
+                    receivedData
+                );
             }
         }
         catch (OperationCanceledException)

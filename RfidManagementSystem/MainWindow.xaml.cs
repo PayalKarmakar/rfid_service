@@ -55,13 +55,7 @@ namespace RfidManagementSystem
             _cctvCamera = new CctvCamera(
                 "rtsp://tapoadmin:tapoadmin@192.168.1.19:554/stream1"
             );
-    //        MessageBox.Show(
-    //    "RFID Management System started successfully.",
-    //    "Application Started",
-    //    MessageBoxButton.OK,
-    //    MessageBoxImage.Information
-    //);
-
+   
 
         }
 
