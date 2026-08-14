@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "dgSpecHash": "fvVFSnhi5vs=",
+  "success": true,
+  "projectFilePath": "D:\\ApplicationForm\\RfidManagementSystem\\RfidManagementSystem\\RfidManagementSystem.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Payal\\.nuget\\packages\\opencvsharp4\\4.13.0.20260627\\opencvsharp4.4.13.0.20260627.nupkg.sha512",
+    "C:\\Users\\Payal\\.nuget\\packages\\opencvsharp4.runtime.win\\4.13.0.20260627\\opencvsharp4.runtime.win.4.13.0.20260627.nupkg.sha512",
+    "C:\\Users\\Payal\\.nuget\\packages\\system.memory\\4.6.3\\system.memory.4.6.3.nupkg.sha512"
+  ],
+  "logs": []
+}
