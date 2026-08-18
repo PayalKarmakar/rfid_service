@@ -38,7 +38,8 @@ public class RfidTransactionService
                 SELECT
                     emp_id,
                     employee_name,
-                    employee_code
+                    employee_code,
+                    chamber_id
                 FROM public.master_employees
                 WHERE card_uid = @cardUid
                 AND is_active = TRUE
@@ -80,6 +81,27 @@ public class RfidTransactionService
             string employeeCode =
                 reader.GetString(2);
 
+            int? chamberId =
+    reader.IsDBNull(3)
+        ? null
+        : reader.GetInt32(3);
+
+            if (!chamberId.HasValue)
+            {
+                await reader.CloseAsync();
+
+                await _systemLogService.LogAsync(
+                    "RFID_SERVICE",
+                    "WARNING",
+                    "CHAMBER_NOT_ASSIGNED",
+                    $"Access denied. Employee {employeeName} ({employeeCode}) does not have a chamber assigned.",
+                    readerIp,
+                    readerPort
+                );
+
+                return;
+            }
+
             await reader.CloseAsync();
 
             // Employee is valid
@@ -88,6 +110,7 @@ public class RfidTransactionService
                 await ProcessEntryAsync(
                     connection,
                     employeeId,
+                    chamberId.Value,
                     employeeName,
                     employeeCode,
                     cardUid,
@@ -125,6 +148,7 @@ public class RfidTransactionService
     private async Task ProcessEntryAsync(
     NpgsqlConnection connection,
     long employeeId,
+    int chamberId,
     string employeeName,
     string employeeCode,
     string cardUid,
@@ -174,6 +198,7 @@ public class RfidTransactionService
             INSERT INTO public.rfid_transactions
             (
                 employee_id,
+                chamber_id,
                 employee_name,
                 card_uid,
                 entry_time,
@@ -185,6 +210,7 @@ public class RfidTransactionService
             VALUES
             (
                 @employeeId,
+                @chamberId,
                 @employeeName,
                 @cardUid,
                 NOW(),
@@ -209,6 +235,11 @@ public class RfidTransactionService
         insertCommand.Parameters.AddWithValue(
             "employeeName",
             employeeName
+        );
+
+        insertCommand.Parameters.AddWithValue(
+            "chamberId",
+            chamberId
         );
 
         insertCommand.Parameters.AddWithValue(
