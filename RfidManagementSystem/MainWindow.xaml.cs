@@ -1,168 +1,220 @@
-﻿using System;
-using System.Windows;
+﻿using System.Linq;
+using RfidManagementSystem.Models;
 using RfidManagementSystem.Services;
+using System;
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Navigation;
 
 namespace RfidManagementSystem
 {
-    public partial class MainWindow : System.Windows.Window
+    public partial class MainWindow : Window
     {
-      
         private readonly RfidService _rfidService;
-        private readonly ConfigurationService _configurationService;
-        public MainWindow()
+
+        public MainWindow(RfidService rfidService)
         {
             InitializeComponent();
 
-            _configurationService = new ConfigurationService();
+            // ==========================================
+            // USE THE SAME RFID SERVICE INSTANCE
+            // CREATED AND STARTED IN App.xaml.cs
+            // ==========================================
 
-            int entryPort = _configurationService.GetEntryPort();
-            int exitPort = _configurationService.GetExitPort();
+            _rfidService = rfidService;
 
-            txtEntryPort.Text = $"TCP Port: {entryPort}";
-            txtExitPort.Text = $"TCP Port: {exitPort}";
+            // ==========================================
+            // SUBSCRIBE TO RFID SCAN RESULTS
+            // ==========================================
 
-            _rfidService = new RfidService();
-          
-
-            // RFID server started
-            //_rfidService.ServerStarted += OnServerStarted;// testing purpose
-
-            // RFID reader connected
-            //_rfidService.ReaderConnected += OnReaderConnected;//testing purpose
-
-            // RFID card data received
-            _rfidService.CardDataReceived += OnCardDataReceived;
-
-            // Start RFID service
-            StartRfidService();
-            
-        }
-        private async void StartRfidService()
-        {
-            try
-            {
-                await _rfidService.StartAsync();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    ex.Message,
-                    "RFID Service Error",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error
-                );
-            }
+            _rfidService.ScanProcessed += OnScanProcessed;
+            _rfidService.ReaderConnectionStatusChanged += OnReaderConnectionStatusChanged; // for dashboard Viewing RFID Connected devices
+                                                                                           // Load current reader status
+            UpdateReaderStatus();
         }
 
-        // Testing Function
-        //private async void StartRfidService()
-        //{
-        //    try
-        //    {
-        //        await _rfidService.StartAsync();
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        MessageBox.Show(
-        //            ex.Message,
-        //            "RFID Service Error",
-        //            MessageBoxButton.OK,
-        //            MessageBoxImage.Error
-        //        );
-        //    }
-        //}
+        // ==========================================
+        // RFID SCAN RESULT
+        // ==========================================
 
-        //private void OnServerStarted(string message)
-        //{
-        //    Dispatcher.Invoke(() =>
-        //    {
-        //        MessageBox.Show(
-        //            message,
-        //            "RFID TCP Server",
-        //            MessageBoxButton.OK,
-        //            MessageBoxImage.Information
-        //        );
-        //    });
-        //}
-        private void OnReaderConnected(string readerType,string status)
+        private void OnScanProcessed(MasterRfidReader reader, string readerIp,int readerPort, RfidScanResult result)
         {
             Dispatcher.Invoke(() =>
             {
-                string cleanStatus = status
-                    .Replace("RFID_READER_CONNECTED|", "")
-                    .Replace("|", "\n");
-
-                MessageBox.Show(
-                    $"{readerType} RFID Reader Connected!\n\n" +
-                    cleanStatus,
-                    "RFID Reader Detected",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information
-                );
-            });
-        }
-        private void OnCardDataReceived(string direction,string readerIp,int serverPort, byte[] data)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                string hexData = BitConverter
-                    .ToString(data)
-                    .Replace("-", " ");
-
-                string cardUid = ParseCardUid(data);
-
-                txtReceivedData.Text =
-                    $"Direction: {direction}\n\n" +
+                string displayText =
+                    $"Reader: {reader.ReaderName}\n" +
+                    $"Purpose: {reader.ReaderPurpose}\n\n" +
                     $"Reader IP: {readerIp}\n" +
-                    $"Server Port: {serverPort}\n\n" +
-                    $"Card UID: {cardUid}\n\n" +
-                    $"HEX: {hexData}";
+                    $"Server Port: {readerPort}\n\n" +
+                    $"Card UID: {result.CardUid}\n\n" +
+                    $"Result: {result.ResultType}\n" +
+                    $"Message: {result.Message}";
+
+                // ==========================================
+                // EMPLOYEE DETAILS
+                // ==========================================
+
+                if (result.EmployeeId.HasValue)
+                {
+                    displayText +=
+                        $"\n\nEmployee ID: {result.EmployeeId}";
+                }
+
+                if (!string.IsNullOrWhiteSpace(
+                    result.EmployeeName))
+                {
+                    displayText +=
+                        $"\nEmployee Name: {result.EmployeeName}";
+                }
+
+                if (!string.IsNullOrWhiteSpace(
+                    result.EmployeeCode))
+                {
+                    displayText +=
+                        $"\nEmployee Code: {result.EmployeeCode}";
+                }
+
+                // ==========================================
+                // ALERT / ANNOUNCEMENT STATUS
+                // ==========================================
+
+                displayText +=
+                    $"\n\nDashboard Alert: " +
+                    $"{result.ShouldAlertDashboard}";
+
+                displayText +=
+                    $"\nAnnouncement Required: " +
+                    $"{result.ShouldAnnounce}";
+
+                // ==========================================
+                // LATEST RFID DATA
+                // ==========================================
+
+                txtReceivedData.Text = displayText;
+
+                // ==========================================
+                // ALERT SECTION
+                // ==========================================
+
+                if (result.ShouldAlertDashboard)
+                {
+                    txtAlerts.Text =
+                        $"[{DateTime.Now:HH:mm:ss}]\n" +
+                        $"Reader: {reader.ReaderName}\n" +
+                        $"Purpose: {reader.ReaderPurpose}\n\n" +
+                        $"{result.ResultType}: {result.Message}";
+                }
+
+                // ==========================================
+                // ERROR SECTION
+                // ==========================================
+
+                if (result.ResultType ==
+                    RfidScanResultType.ERROR)
+                {
+                    txtErrors.Text =
+                        $"[{DateTime.Now:HH:mm:ss}]\n" +
+                        $"Reader: {reader.ReaderName}\n\n" +
+                        $"Error: {result.Message}";
+                }
             });
-        }       
-        private string ParseCardUid(byte[] data)
+        }
+
+        // ==========================================
+        // CODEINQ WEBSITE LINK
+        // ==========================================
+
+        private void CodeInQHyperlink_RequestNavigate(object sender,RequestNavigateEventArgs e)
         {
-            // Minimum expected:
-            // Frame + Command + Error + UID Length + UID + CRC
-            if (data == null || data.Length < 8)
-                return "Invalid RFID Data";
-
-            // Check command = 2F01 (Inventory)
-            if (data[1] != 0x2F || data[2] != 0x01)
-                return "Unknown RFID Command";
-
-            // Check error code
-            if (data[3] != 0x00 || data[4] != 0x00)
-                return "RFID Reader Error";
-
-            // UID length
-            int uidLength = data[5];
-
-            // Make sure complete UID is available
-            if (data.Length < 6 + uidLength)
-                return "Incomplete UID Data";
-
-            byte[] uid = new byte[uidLength];
-
-            Array.Copy(
-                data,
-                6,
-                uid,
-                0,
-                uidLength
+            Process.Start(
+                new ProcessStartInfo
+                {
+                    FileName = e.Uri.AbsoluteUri,
+                    UseShellExecute = true
+                }
             );
 
-            return BitConverter
-                .ToString(uid)
-                .Replace("-", "");
+            e.Handled = true;
         }
+
+        private void OnReaderConnectionStatusChanged()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                UpdateReaderStatus();
+            });
+        }
+
+        private void UpdateReaderStatus()
+        {
+            var connectedReaders =
+                _rfidService.GetConnectedReaders();
+
+            var disconnectedReaders =
+                _rfidService.GetDisconnectedReaders();
+
+            // ==========================================
+            // CONNECTED READERS
+            // ==========================================
+
+            if (connectedReaders.Count == 0)
+            {
+                txtConnectedReaders.Text =
+                    "No readers connected.";
+            }
+            else
+            {
+                txtConnectedReaders.Text =
+                    $"Connected Readers: {connectedReaders.Count}\n\n" +
+                    string.Join(
+                        "\n\n",
+                        connectedReaders.Select(reader =>
+                            $"● {reader.ReaderName}\n" +
+                            $"   IP: {reader.IpAddress}\n" +
+                            $"   Port: {reader.Port}\n" +
+                            $"   Purpose: {reader.ReaderPurpose}"
+                        )
+                    );
+            }
+
+            // ==========================================
+            // DISCONNECTED READERS
+            // ==========================================
+
+            if (disconnectedReaders.Count == 0)
+            {
+                txtDisconnectedReaders.Text =
+                    "All readers are connected.";
+            }
+            else
+            {
+                txtDisconnectedReaders.Text =
+                    $"Disconnected Readers: {disconnectedReaders.Count}\n\n" +
+                    string.Join(
+                        "\n\n",
+                        disconnectedReaders.Select(reader =>
+                            $"● {reader.ReaderName}\n" +
+                            $"   IP: {reader.IpAddress}\n" +
+                            $"   Port: {reader.Port}\n" +
+                            $"   Purpose: {reader.ReaderPurpose}"
+                        )
+                    );
+            }
+        }
+
+        // ==========================================
+        // CLOSE RFID TCP SERVICE
+        // ==========================================
+
         protected override void OnClosed(EventArgs e)
         {
+            // Remove event subscription
+            _rfidService.ScanProcessed -= OnScanProcessed;
+
+            // Stop RFID TCP servers
             _rfidService.Stop();
 
             base.OnClosed(e);
         }
-
-
-
     }
 }

@@ -1,5 +1,5 @@
 ﻿using Npgsql;
-
+using RfidManagementSystem.Models;
 namespace RfidManagementSystem.Services;
 
 public class RfidTransactionService
@@ -7,130 +7,112 @@ public class RfidTransactionService
     private readonly ConfigurationService _configurationService;
     private readonly SystemLogService _systemLogService;
 
-    public RfidTransactionService(
-        ConfigurationService configurationService,
-        SystemLogService systemLogService)
+    public RfidTransactionService(ConfigurationService configurationService,SystemLogService systemLogService)
     {
         _configurationService = configurationService;
         _systemLogService = systemLogService;
     }
 
-    public async Task ProcessCardAsync(
-        string direction,
-        string cardUid,
-        string readerIp,
-        int readerPort,
-        string rawHexData)
+    public async Task<RfidScanResult> ProcessCardAsync(MasterRfidReader reader,string cardUid, string readerIp,int readerPort,string rawHexData)
     {
         try
         {
-            string connectionString =
-                _configurationService.GetConnectionString();
-
-            await using var connection =
-                new NpgsqlConnection(connectionString);
-
+            string connectionString = _configurationService.GetConnectionString();
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync();
 
-            // Check whether this RFID card is mapped
-            // to an active employee
+            // ==========================================
+            // EMPLOYEE REGISTRATION
+            // No employee lookup required
+            // ==========================================
+
+            //if (reader.ReaderPurpose == RfidReaderPurpose.EMPLOYEE_REGISTRATION)
+            //{
+            //    return await ProcessEmployeeRegistrationAsync(connection,reader,cardUid, readerIp, readerPort,rawHexData);
+            //}
+
+            // ==========================================
+            // FIND EMPLOYEE USING CARD UID
+            // ==========================================
+
             const string employeeSql = @"
-                SELECT
-                    emp_id,
-                    employee_name,
-                    employee_code,
-                    chamber_id
-                FROM public.master_employees
-                WHERE card_uid = @cardUid
-                AND is_active = TRUE
-                LIMIT 1;
-            ";
+                            SELECT emp_id,employee_name,employee_code,chamber_id
+                            FROM public.master_employees
+                            WHERE card_uid = @cardUid
+                            AND is_active = TRUE
+                            LIMIT 1;
+                        ";
 
-            await using var command =
-                new NpgsqlCommand(employeeSql, connection);
+            await using var command = new NpgsqlCommand(employeeSql,connection);
+            command.Parameters.AddWithValue("cardUid",cardUid);
+            await using var dbReader =await command.ExecuteReaderAsync();
 
-            command.Parameters.AddWithValue(
-                "cardUid",
-                cardUid
-            );
+            // ==========================================
+            // CARD NOT FOUND
+            // ==========================================
 
-            await using var reader =
-                await command.ExecuteReaderAsync();
-
-            if (!await reader.ReadAsync())
+            if (!await dbReader.ReadAsync())
             {
-                await reader.CloseAsync();
+                await dbReader.CloseAsync();
 
                 await _systemLogService.LogAsync(
                     "RFID_SERVICE",
                     "WARNING",
-                    "ACCESS_DENIED",
-                    $"Access denied. RFID Card UID {cardUid} is not mapped to an active employee.",
+                    "UNAUTHORIZED",
+                    $"Unauthorized RFID card detected. Card UID: {cardUid}.",
                     readerIp,
                     readerPort
                 );
 
-                return;
+                return new RfidScanResult
+                {
+                    ResultType = RfidScanResultType.UNAUTHORIZED,
+                    Message = "Unauthorized RFID card.",
+                    CardUid = cardUid,
+                    ShouldAlertDashboard = true,
+                    ShouldAnnounce = true
+                };
             }
 
-            long employeeId = reader.GetInt64(0);
+            // ==========================================
+            // GET EMPLOYEE DETAILS
+            // ==========================================
 
-            string employeeName =
-                reader.GetString(1);
+            long employeeId =dbReader.GetInt64(0);
+            string employeeName = dbReader.GetString(1);
+            string employeeCode = dbReader.GetString(2);
+            int? chamberId =dbReader.IsDBNull(3) ? null: dbReader.GetInt32(3);
+            await dbReader.CloseAsync();
 
-            string employeeCode =
-                reader.GetString(2);
+            // ==========================================
+            // PROCESS ACCORDING TO READER PURPOSE
+            // ==========================================
 
-            int? chamberId =
-    reader.IsDBNull(3)
-        ? null
-        : reader.GetInt32(3);
-
-            if (!chamberId.HasValue)
+            switch (reader.ReaderPurpose)
             {
-                await reader.CloseAsync();
+                case RfidReaderPurpose.ENTRY:
+                    return await ProcessEntryAsync(connection, reader, employeeId, chamberId, employeeName, employeeCode, cardUid, readerIp, readerPort, rawHexData);
 
-                await _systemLogService.LogAsync(
-                    "RFID_SERVICE",
-                    "WARNING",
-                    "CHAMBER_NOT_ASSIGNED",
-                    $"Access denied. Employee {employeeName} ({employeeCode}) does not have a chamber assigned.",
-                    readerIp,
-                    readerPort
-                );
+                case RfidReaderPurpose.EXIT:
+                    return await ProcessExitAsync(connection, reader, employeeId, employeeName, employeeCode, cardUid, readerIp, readerPort, rawHexData);
 
-                return;
+                case RfidReaderPurpose.ENTRY_EXIT:
+                    return await ProcessEntryExitAsync(connection, reader, employeeId, chamberId, employeeName, employeeCode, cardUid, readerIp, readerPort, rawHexData);
+
+                //case RfidReaderPurpose.EMPLOYEE_REGISTRATION:
+                //    return await ProcessEmployeeRegistrationAsync(connection, reader, cardUid, readerIp, readerPort, rawHexData);
+
+                default:
+                    return new RfidScanResult
+                    {
+                        ResultType = RfidScanResultType.ERROR,
+                        Message = $"Unsupported reader purpose: {reader.ReaderPurpose}",
+                        CardUid = cardUid,
+                        ShouldAlertDashboard = true,
+                        ShouldAnnounce = false
+                    };
             }
 
-            await reader.CloseAsync();
-
-            // Employee is valid
-            if (direction == "ENTRY")
-            {
-                await ProcessEntryAsync(
-                    connection,
-                    employeeId,
-                    chamberId.Value,
-                    employeeName,
-                    employeeCode,
-                    cardUid,
-                    readerIp,
-                    readerPort,
-                    rawHexData
-                );
-            }
-            else if (direction == "EXIT")
-            {
-                await ProcessExitAsync(
-                    connection,
-                    employeeId,
-                    employeeName,
-                    cardUid,
-                    readerIp,
-                    readerPort,
-                    rawHexData
-                );
-            }
         }
         catch (Exception ex)
         {
@@ -142,146 +124,173 @@ public class RfidTransactionService
                 readerIp,
                 readerPort
             );
+
+            return new RfidScanResult
+            {
+                ResultType = RfidScanResultType.ERROR,
+                Message = $"Error processing card: {ex.Message}",
+                CardUid = cardUid,
+                ShouldAlertDashboard = true,
+                ShouldAnnounce = false
+            };
         }
+
+
+        
     }
 
-    private async Task ProcessEntryAsync(
-    NpgsqlConnection connection,
-    long employeeId,
-    int chamberId,
-    string employeeName,
-    string employeeCode,
-    string cardUid,
-    string readerIp,
-    int readerPort,
-    string rawHexData)
-    { 
-        const string checkOpenTransactionSql = @"
-            SELECT id
-            FROM public.rfid_transactions
-            WHERE employee_id = @employeeId
-            AND exit_time IS NULL
-            AND status <> 'INCOMPLETE'
-            ORDER BY entry_time DESC
-            LIMIT 1;
-        ";
+    private async Task<RfidScanResult> ProcessEntryAsync(NpgsqlConnection connection,MasterRfidReader reader,long employeeId,
+        int? chamberId,string employeeName,string employeeCode, string cardUid,string readerIp,int readerPort,string rawHexData)
+    {
+        // ==========================================
+        // CHAMBER VALIDATION FOR ENTRY
+        // ==========================================
 
-        await using var checkCommand =
-            new NpgsqlCommand(
-                checkOpenTransactionSql,
-                connection
-            );
-
-        checkCommand.Parameters.AddWithValue(
-            "employeeId",
-            employeeId
-        );
-
-        object? openTransaction =
-            await checkCommand.ExecuteScalarAsync();
-
-        if (openTransaction != null)
+        if (!chamberId.HasValue)
         {
             await _systemLogService.LogAsync(
                 "RFID_SERVICE",
                 "WARNING",
-                "ALREADY_INSIDE",
-                $"ENTRY denied. Employee {employeeName} already has an open transaction.",
+                "CHAMBER_NOT_ASSIGNED",
+                $"Entry denied. Employee {employeeName} " +
+                $"({employeeCode}) does not have a chamber assigned.",
                 readerIp,
                 readerPort
             );
 
-            return;
+            return new RfidScanResult
+            {
+                ResultType = RfidScanResultType.ACCESS_DENIED,
+                Message = $"Entry denied. {employeeName} does not have a chamber assigned.",
+                CardUid = cardUid,
+                EmployeeId = employeeId,
+                EmployeeName = employeeName,
+                EmployeeCode = employeeCode,
+                ShouldAlertDashboard = true,
+                ShouldAnnounce = true
+            };
         }
 
+        // ==========================================
+        // CHECK OPEN TRANSACTION
+        // ==========================================
+
+        const string checkOpenTransactionSql = @"
+                                        SELECT id
+                                        FROM public.rfid_transactions
+                                        WHERE employee_id = @employeeId
+                                        AND exit_time IS NULL
+                                        AND status <> 'INCOMPLETE'
+                                        ORDER BY entry_time DESC
+                                        LIMIT 1;
+                                    ";
+
+        await using var checkCommand = new NpgsqlCommand(checkOpenTransactionSql,connection);
+
+        checkCommand.Parameters.AddWithValue("employeeId",employeeId);
+
+        object? openTransaction = await checkCommand.ExecuteScalarAsync();
+
+        // ==========================================
+        // EMPLOYEE ALREADY INSIDE
+        // ==========================================
+
+        if (openTransaction != null)
+        {
+            await _systemLogService.LogAsync("RFID_SERVICE","WARNING", "ALREADY_INSIDE", $"ENTRY denied. Employee {employeeName} already has an open transaction.",
+                readerIp,
+                readerPort
+            );
+
+            return new RfidScanResult
+            {
+                ResultType = RfidScanResultType.ACCESS_DENIED,
+                Message = $"Entry denied. {employeeName} is already inside.",
+                CardUid = cardUid,
+                EmployeeId = employeeId,
+                EmployeeName = employeeName,
+                EmployeeCode = employeeCode,
+                ShouldAlertDashboard = true,
+                ShouldAnnounce = true
+            };
+        }
+
+        // ==========================================
+        // CREATE ENTRY TRANSACTION
+        // ==========================================
+
         const string insertSql = @"
-            INSERT INTO public.rfid_transactions
-            (
-                employee_id,
-                chamber_id,
-                employee_name,
-                card_uid,
-                entry_time,
-                entry_reader_ip,
-                entry_reader_port,
-                entry_raw_hex_data,
-                status
-            )
-            VALUES
-            (
-                @employeeId,
-                @chamberId,
-                @employeeName,
-                @cardUid,
-                NOW(),
-                @readerIp,
-                @readerPort,
-                @rawHexData,
-                'OPEN'
-            );
-        ";
+                        INSERT INTO public.rfid_transactions
+                        (
+                            employee_id,
+                            chamber_id,
+                            employee_name,
+                            card_uid,
+                            entry_time,
+                            entry_reader_ip,
+                            entry_reader_port,
+                            entry_raw_hex_data,
+                            status
+                        )
+                        VALUES
+                        (
+                            @employeeId,
+                            @chamberId,
+                            @employeeName,
+                            @cardUid,
+                            NOW(),
+                            @readerIp,
+                            @readerPort,
+                            @rawHexData,
+                            'OPEN'
+                        );
+                    ";
 
-        await using var insertCommand =
-            new NpgsqlCommand(
-                insertSql,
-                connection
-            );
+        await using var insertCommand = new NpgsqlCommand(insertSql,connection);
 
-        insertCommand.Parameters.AddWithValue(
-            "employeeId",
-            employeeId
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "employeeName",
-            employeeName
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "chamberId",
-            chamberId
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "cardUid",
-            cardUid
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "readerIp",
-            readerIp
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "readerPort",
-            readerPort
-        );
-
-        insertCommand.Parameters.AddWithValue(
-            "rawHexData",
-            rawHexData
-        );
-
+        insertCommand.Parameters.AddWithValue("employeeId", employeeId);
+        insertCommand.Parameters.AddWithValue("employeeName", employeeName);
+        insertCommand.Parameters.AddWithValue("chamberId",chamberId.Value);
+        insertCommand.Parameters.AddWithValue( "cardUid",cardUid);
+        insertCommand.Parameters.AddWithValue( "readerIp", readerIp);
+        insertCommand.Parameters.AddWithValue("readerPort",readerPort);
+        insertCommand.Parameters.AddWithValue("rawHexData",rawHexData);
         await insertCommand.ExecuteNonQueryAsync();
+
+        // ==========================================
+        // SYSTEM LOG
+        // ==========================================
 
         await _systemLogService.LogAsync(
             "RFID_SERVICE",
             "INFO",
             "ENTRY_RECORDED",
-            $"Entry recorded for {employeeName} ({employeeCode}).",
+            $"Entry recorded for {employeeName} ({employeeCode}) " +
+            $"using RFID Reader '{reader.ReaderName}'.",
             readerIp,
             readerPort
         );
+
+        // ==========================================
+        // RETURN RESULT
+        // ==========================================
+
+        return new RfidScanResult
+        {
+            ResultType = RfidScanResultType.ENTRY_RECORDED,
+            Message = $"Entry recorded successfully for {employeeName}.",
+            CardUid = cardUid,
+            EmployeeId = employeeId,
+            EmployeeName = employeeName,
+            EmployeeCode = employeeCode,
+            ShouldAlertDashboard = false,
+            ShouldAnnounce = false
+        };
     }
 
-    private async Task ProcessExitAsync(
-        NpgsqlConnection connection,
-        long employeeId,
-        string employeeName,
-        string cardUid,
-        string readerIp,
-        int readerPort,
-        string rawHexData)
+    private async Task<RfidScanResult> ProcessExitAsync(NpgsqlConnection connection, MasterRfidReader reader, long employeeId,
+        string employeeName, string employeeCode, string cardUid, string readerIp, int readerPort, string rawHexData)
+    
     {
         const string updateSql = @"
             UPDATE public.rfid_transactions
@@ -303,11 +312,7 @@ public class RfidTransactionService
             );
         ";
 
-        await using var updateCommand =
-            new NpgsqlCommand(
-                updateSql,
-                connection
-            );
+        await using var updateCommand =new NpgsqlCommand(updateSql,connection);
 
         updateCommand.Parameters.AddWithValue(
             "employeeId",
@@ -332,27 +337,287 @@ public class RfidTransactionService
         int rowsAffected =
             await updateCommand.ExecuteNonQueryAsync();
 
+        // ==========================================
+        // NO OPEN ENTRY FOUND
+        // ==========================================
+
         if (rowsAffected == 0)
         {
             await _systemLogService.LogAsync(
                 "RFID_SERVICE",
                 "WARNING",
                 "EXIT_WITHOUT_ENTRY",
-                $"Exit detected for {employeeName}, but no open ENTRY transaction was found.",
+                $"Exit denied. Employee {employeeName} " +
+                $"({employeeCode}) does not have an open ENTRY transaction.",
                 readerIp,
                 readerPort
             );
 
-            return;
+            return new RfidScanResult
+            {
+                ResultType =
+                    RfidScanResultType.ACCESS_DENIED,
+
+                Message =
+                    $"Exit denied. {employeeName} does not have an open entry.",
+
+                CardUid = cardUid,
+
+                EmployeeId = employeeId,
+
+                EmployeeName = employeeName,
+
+                EmployeeCode = employeeCode,
+
+                ShouldAlertDashboard = true,
+
+                ShouldAnnounce = true
+            };
         }
+
+        // ==========================================
+        // EXIT SUCCESSFULLY RECORDED
+        // ==========================================
 
         await _systemLogService.LogAsync(
             "RFID_SERVICE",
             "INFO",
             "EXIT_RECORDED",
-            $"Exit recorded for {employeeName}.",
+            $"Exit recorded for {employeeName} ({employeeCode}) " +
+            $"using RFID Reader '{reader.ReaderName}'.",
             readerIp,
             readerPort
         );
+
+        return new RfidScanResult
+        {
+            ResultType = RfidScanResultType.EXIT_RECORDED,
+
+            Message = $"Exit recorded successfully for {employeeName}.",
+
+            CardUid = cardUid,
+
+            EmployeeId = employeeId,
+
+            EmployeeName = employeeName,
+
+            EmployeeCode = employeeCode,
+
+            ShouldAlertDashboard = false,
+
+            ShouldAnnounce = false
+        };
     }
+
+    private async Task<RfidScanResult> ProcessEntryExitAsync(NpgsqlConnection connection, MasterRfidReader reader, long employeeId,
+        int? chamberId, string employeeName, string employeeCode, string cardUid, string readerIp, int readerPort, string rawHexData)
+    
+    {
+        // ==========================================
+        // GET LATEST OPEN TRANSACTION
+        // PostgreSQL calculates elapsed time
+        // using database server time
+        // ==========================================
+
+        const string openTransactionSql = @"
+                    SELECT
+                        id,
+                        EXTRACT(
+                            EPOCH FROM (NOW() - entry_time)
+                        ) AS elapsed_seconds
+                    FROM public.rfid_transactions
+                    WHERE employee_id = @employeeId
+                      AND status = 'OPEN'
+                      AND exit_time IS NULL
+                    ORDER BY entry_time DESC
+                    LIMIT 1;
+                ";
+
+     
+
+        await using var command =new NpgsqlCommand(openTransactionSql,connection);
+
+        command.Parameters.AddWithValue("employeeId",employeeId);
+        await using var dbReader = await command.ExecuteReaderAsync();
+
+        // ==========================================
+        // NO OPEN TRANSACTION  // EMPLOYEE IS OUTSIDE
+        // → THIS IS AN ENTRY
+        // ==========================================
+
+        if (!await dbReader.ReadAsync())
+        {
+            await dbReader.CloseAsync();
+
+            return await ProcessEntryAsync(connection,reader,employeeId,chamberId, employeeName,employeeCode,cardUid,readerIp, readerPort,rawHexData);
+        }
+
+        // ==========================================
+        // OPEN TRANSACTION FOUND
+        // GET DATABASE CALCULATED GAP
+        // ==========================================
+
+        long transactionId = dbReader.GetInt64(0);
+
+        double elapsedSeconds = dbReader.GetDouble(1);
+        await dbReader.CloseAsync();
+
+        // ==========================================
+        // GET CONFIGURED ENTRY   
+        // ==========================================
+
+        int entryExitGapSeconds = _configurationService.GetEntryExitGapSeconds();      
+
+        // ==========================================
+        // COOLDOWN SCAN
+        // ==========================================
+
+        if (elapsedSeconds < entryExitGapSeconds)
+        {
+            int remainingSeconds = Math.Max( 1,entryExitGapSeconds -(int)Math.Floor(elapsedSeconds));
+            await _systemLogService.LogAsync(
+                "RFID_SERVICE",
+                "WARNING",
+                "SCAN_COOLDOWN",
+                $"RFID scan ignored for {employeeName} " + $"({employeeCode}). Please wait {remainingSeconds} " + $"seconds before scanning again.",
+                readerIp,
+                readerPort
+            );
+
+            return new RfidScanResult
+            {
+                ResultType = RfidScanResultType.SCAN_COOLDOWN,
+                Message =  $"Please wait {remainingSeconds} seconds " + $"before scanning again.",
+                CardUid = cardUid,
+                EmployeeId = employeeId,
+                EmployeeName = employeeName,
+                EmployeeCode = employeeCode,
+                ShouldAlertDashboard = true,
+                ShouldAnnounce = true
+            };
+        }
+
+        // ==========================================
+        // GAP COMPLETED
+        // → THIS IS AN EXIT
+        // ==========================================
+
+        return await ProcessExitAsync(connection, reader,employeeId,employeeName,employeeCode,cardUid,readerIp, readerPort, rawHexData);
+    }
+
+    private async Task<RfidScanResult> ProcessEmployeeRegistrationAsync(NpgsqlConnection connection,MasterRfidReader reader, string cardUid,string readerIp,
+        int readerPort,string rawHexData)
+    {
+        try
+        {
+            // Check whether this card is already assigned
+            const string checkCardSql = @"
+            SELECT
+                emp_id,
+                employee_name,
+                employee_code,
+                chamber_id
+            FROM public.master_employees
+            WHERE card_uid = @cardUid
+            AND is_active = TRUE
+            LIMIT 1;
+        ";
+
+            await using var command = new NpgsqlCommand(checkCardSql, connection);
+            command.Parameters.AddWithValue("cardUid",cardUid);
+
+            await using var dbReader = await command.ExecuteReaderAsync();
+
+            // ==========================================
+            // CARD IS ALREADY ASSIGNED
+            // ==========================================
+
+            if (await dbReader.ReadAsync())
+            {
+                long employeeId = dbReader.GetInt64(0);
+
+                string employeeName = dbReader.GetString(1);
+
+                string employeeCode = dbReader.GetString(2);
+
+                await dbReader.CloseAsync();
+
+                await _systemLogService.LogAsync(
+                    "RFID_SERVICE",
+                    "WARNING",
+                    "RFID_CARD_ALREADY_ASSIGNED",
+                    $"RFID card {cardUid} is already assigned to " +
+                    $"{employeeName} ({employeeCode}).",
+                    readerIp,
+                    readerPort
+                );
+
+                return new RfidScanResult
+                {
+                    ResultType = RfidScanResultType.ACCESS_DENIED,
+
+                    Message = $"RFID card is already assigned to " + $"{employeeName}.",
+                    CardUid = cardUid,
+                    EmployeeId = employeeId,
+                    EmployeeName = employeeName,
+                    EmployeeCode = employeeCode,
+                    ShouldAlertDashboard = true,
+                    ShouldAnnounce = true
+                };
+            }
+
+            await dbReader.CloseAsync();
+
+            // ==========================================
+            // NEW CARD DETECTED FOR REGISTRATION
+            // ==========================================
+
+            await _systemLogService.LogAsync(
+                "RFID_SERVICE",
+                "INFO",
+                "EMPLOYEE_REGISTRATION_CARD_DETECTED",
+                $"New RFID card detected for employee registration. " +
+                $"Card UID: {cardUid}. " +
+                $"Reader: '{reader.ReaderName}'.",
+                readerIp,
+                readerPort
+            );
+
+            return new RfidScanResult
+            {
+                ResultType = RfidScanResultType.EMPLOYEE_REGISTRATION,
+
+                Message ="RFID card detected successfully for employee registration.",
+
+                CardUid = cardUid,
+
+                ShouldAlertDashboard = true,
+
+                ShouldAnnounce = false
+            };
+        }
+        catch (Exception ex)
+        {
+            await _systemLogService.LogAsync(
+                "RFID_SERVICE",
+                "ERROR",
+                "EMPLOYEE_REGISTRATION_ERROR",
+                $"Error processing registration card {cardUid}: " +
+                $"{ex.Message}",
+                readerIp,
+                readerPort
+            );
+
+            return new RfidScanResult
+            {
+                ResultType =RfidScanResultType.ERROR,
+                Message =$"Error processing RFID registration card: {ex.Message}",
+                CardUid = cardUid,
+                ShouldAlertDashboard = true,
+                ShouldAnnounce = false
+            };
+        }
+    }
+
+    
 }

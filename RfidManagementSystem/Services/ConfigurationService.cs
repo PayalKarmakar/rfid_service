@@ -28,19 +28,45 @@ public class ConfigurationService
         );
     }
 
-    public int GetEntryPort()
+    //public int GetEntryPort()
+    //{
+    //    return int.Parse(
+    //        _configuration["RfidSettings:EntryPort"]
+    //        ?? throw new Exception("EntryPort is missing.")
+    //    );
+    //}
+
+    //public int GetExitPort()
+    //{
+    //    return int.Parse(
+    //        _configuration["RfidSettings:ExitPort"]
+    //        ?? throw new Exception("ExitPort is missing.")
+    //    );
+    //}
+
+    public int GetEntryExitGapSeconds()
     {
         return int.Parse(
-            _configuration["RfidSettings:EntryPort"]
-            ?? throw new Exception("EntryPort is missing.")
+            _configuration["RfidSettings:EntryExitGapSeconds"]
+            ?? "30"
         );
     }
 
-    public int GetExitPort()
+    public int GetReaderConnectionRetryIntervalSeconds()
     {
         return int.Parse(
-            _configuration["RfidSettings:ExitPort"]
-            ?? throw new Exception("ExitPort is missing.")
+            _configuration[
+                "RfidSettings:ReaderConnectionRetryIntervalSeconds"
+            ] ?? "2"
+        );
+    }
+
+    public int GetReaderConnectionRetryDurationMinutes()
+    {
+        return int.Parse(
+            _configuration[
+                "RfidSettings:ReaderConnectionRetryDurationMinutes"
+            ] ?? "5"
         );
     }
 }
