@@ -1,4 +1,4 @@
-﻿using RfidManagementSystem.Hardware.Rfid;
+using RfidManagementSystem.Hardware.Rfid;
 using RfidManagementSystem.Models;
 using System;
 using System.Diagnostics;
@@ -93,6 +93,10 @@ public class RfidService
             // Monitor physical RFID reader connections
             // and retry/check based on appsettings configuration
             _ = MonitorReaderConnectionsAsync();
+
+            // Keep reader purpose/IP/active flags in sync with DB
+            // so ENTRY <-> EMPLOYEE_REGISTRATION changes apply without restart.
+            _ = MonitorReaderConfigurationAsync();
         }
         catch (Exception ex)
         {
@@ -132,6 +136,8 @@ public class RfidService
         server.DataReceived +=
             (readerIp, serverPort, data) =>
             {
+                // Uses same MasterRfidReader instance so purpose updates
+                // from ReloadReaderConfigurationAsync are visible immediately.
                 HandleCardData(
                     reader,
                     readerIp,
@@ -153,6 +159,192 @@ public class RfidService
         );
 
         _ = server.StartAsync(reader.Port);
+    }
+
+    private async Task StopReaderAsync(long readerId, string reason)
+    {
+        if (!_rfidServers.TryGetValue(readerId, out var server))
+        {
+            return;
+        }
+
+        MasterRfidReader? reader = _activeReaders
+            .FirstOrDefault(r => r.ReaderId == readerId);
+
+        try
+        {
+            server.Stop();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error stopping RFID reader {readerId}: {ex.Message}");
+        }
+
+        _rfidServers.Remove(readerId);
+
+        lock (_connectedReaderIds)
+        {
+            _connectedReaderIds.Remove(readerId);
+        }
+
+        lock (_disconnectedReaderIds)
+        {
+            _disconnectedReaderIds.Remove(readerId);
+        }
+
+        await _systemLogService.LogAsync(
+            "RFID_SERVICE",
+            "INFO",
+            "TCP_SERVER_STOPPED",
+            $"Stopped RFID TCP Server for reader_id={readerId}" +
+            (reader == null ? string.Empty : $" '{reader.ReaderName}'") +
+            $". Reason: {reason}.",
+            reader?.IpAddress,
+            reader?.Port
+        );
+    }
+
+    /// <summary>
+    /// Periodically reloads master_rfid_readers so purpose/IP/active changes
+    /// from Dashboard apply without restarting RfidService.
+    /// </summary>
+    private async Task MonitorReaderConfigurationAsync()
+    {
+        int intervalSeconds = Math.Max(
+            3,
+            _configurationService.GetReaderConfigReloadIntervalSeconds());
+
+        while (true)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(intervalSeconds));
+                await ReloadReaderConfigurationAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Reader config reload error: {ex.Message}");
+
+                await _systemLogService.LogAsync(
+                    "RFID_SERVICE",
+                    "ERROR",
+                    "READER_CONFIG_RELOAD_ERROR",
+                    $"Error reloading RFID reader configuration: {ex.Message}",
+                    null,
+                    null
+                );
+            }
+        }
+    }
+
+    private async Task ReloadReaderConfigurationAsync()
+    {
+        List<MasterRfidReader> latestReaders =
+            await _readerConfigurationService.GetActiveReadersAsync();
+
+        var latestById = latestReaders.ToDictionary(r => r.ReaderId);
+
+        // Snapshot current active readers
+        List<MasterRfidReader> currentReaders = _activeReaders.ToList();
+        var currentById = currentReaders.ToDictionary(r => r.ReaderId);
+
+        // Stop readers that were deactivated / removed from DB
+        foreach (var existing in currentReaders)
+        {
+            if (!latestById.ContainsKey(existing.ReaderId))
+            {
+                await StopReaderAsync(
+                    existing.ReaderId,
+                    "Reader deactivated or removed from database");
+            }
+        }
+
+        // Add or update readers from DB
+        foreach (var dbReader in latestReaders)
+        {
+            if (!currentById.TryGetValue(dbReader.ReaderId, out var running))
+            {
+                // Brand new active reader
+                _activeReaders.Add(dbReader);
+                await StartReaderAsync(dbReader);
+
+                await _systemLogService.LogAsync(
+                    "RFID_SERVICE",
+                    "INFO",
+                    "READER_CONFIG_ADDED",
+                    $"Loaded new RFID reader '{dbReader.ReaderName}' " +
+                    $"({dbReader.ReaderPurpose}) on port {dbReader.Port}.",
+                    dbReader.IpAddress,
+                    dbReader.Port
+                );
+                continue;
+            }
+
+            bool purposeChanged = !string.Equals(
+                running.ReaderPurpose,
+                dbReader.ReaderPurpose,
+                StringComparison.OrdinalIgnoreCase);
+
+            bool portChanged = running.Port != dbReader.Port;
+
+            bool metaChanged =
+                !string.Equals(running.ReaderName, dbReader.ReaderName, StringComparison.Ordinal)
+                || !string.Equals(running.IpAddress, dbReader.IpAddress, StringComparison.Ordinal)
+                || !string.Equals(running.ReaderSerialno, dbReader.ReaderSerialno, StringComparison.Ordinal);
+
+            if (portChanged)
+            {
+                // Port change requires TCP restart with a fresh reader instance
+                await StopReaderAsync(running.ReaderId, "Reader port changed in database");
+
+                _activeReaders.RemoveAll(r => r.ReaderId == running.ReaderId);
+                _activeReaders.Add(dbReader);
+                await StartReaderAsync(dbReader);
+
+                await _systemLogService.LogAsync(
+                    "RFID_SERVICE",
+                    "INFO",
+                    "READER_CONFIG_PORT_CHANGED",
+                    $"RFID reader '{dbReader.ReaderName}' port changed " +
+                    $"{running.Port} -> {dbReader.Port}; TCP server restarted. " +
+                    $"Purpose: {dbReader.ReaderPurpose}.",
+                    dbReader.IpAddress,
+                    dbReader.Port
+                );
+                continue;
+            }
+
+            if (purposeChanged || metaChanged)
+            {
+                string oldPurpose = running.ReaderPurpose;
+
+                // Mutate same instance so HandleCardData closures see new purpose immediately
+                running.ReaderName = dbReader.ReaderName;
+                running.ReaderSerialno = dbReader.ReaderSerialno;
+                running.IpAddress = dbReader.IpAddress;
+                running.ReaderPurpose = dbReader.ReaderPurpose;
+                running.IsActive = dbReader.IsActive;
+                running.UpdatedAt = dbReader.UpdatedAt;
+                running.LastUpdatedBy = dbReader.LastUpdatedBy;
+
+                if (purposeChanged)
+                {
+                    await _systemLogService.LogAsync(
+                        "RFID_SERVICE",
+                        "INFO",
+                        "READER_PURPOSE_UPDATED",
+                        $"RFID reader '{running.ReaderName}' purpose updated " +
+                        $"{oldPurpose} -> {running.ReaderPurpose} " +
+                        "(applied live, no service restart).",
+                        running.IpAddress,
+                        running.Port
+                    );
+                }
+            }
+        }
+
+        // Drop deactivated readers from in-memory active list
+        _activeReaders.RemoveAll(r => !latestById.ContainsKey(r.ReaderId));
     }
 
     private async Task MonitorReaderConnectionsAsync()

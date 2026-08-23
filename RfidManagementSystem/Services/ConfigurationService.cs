@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration;
 
 namespace RfidManagementSystem.Services;
 
@@ -67,6 +67,15 @@ public class ConfigurationService
             _configuration[
                 "RfidSettings:ReaderConnectionRetryDurationMinutes"
             ] ?? "5"
+        );
+    }
+
+    public int GetReaderConfigReloadIntervalSeconds()
+    {
+        return int.Parse(
+            _configuration[
+                "RfidSettings:ReaderConfigReloadIntervalSeconds"
+            ] ?? "10"
         );
     }
 }

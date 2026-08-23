@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -142,7 +142,7 @@ public class RfidTcpServer
             client.Close();
 
             StatusChanged?.Invoke(
-                "RFID Reader disconnected."
+                "RFID_READER_DISCONNECTED|reason=client_closed"
             );
         }
     }
