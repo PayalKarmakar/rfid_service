@@ -1,7 +1,8 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using RfidManagementSystem.Services;
 using System;
+using System.Linq;
 using System.Windows;
 
 namespace RfidManagementSystem
@@ -9,97 +10,74 @@ namespace RfidManagementSystem
     public partial class App : Application
     {
         private WebApplication? _webApplication;
+        private bool _backgroundMode;
 
-        protected override async void OnStartup(
-            StartupEventArgs e)
+        protected override async void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
+
+            _backgroundMode = e.Args.Any(a =>
+                string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a, "/background", StringComparison.OrdinalIgnoreCase));
+
+            if (_backgroundMode)
+            {
+                // No UI; stay alive until process is killed (installer / startup).
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            }
 
             try
             {
                 var builder = WebApplication.CreateBuilder();
 
-                // ==========================================
-                // ADD CONTROLLERS
-                // ==========================================
-
                 builder.Services.AddControllers();
-
-                // ==========================================
-                // REGISTER SERVICES
-                // ==========================================
-
-                builder.Services.AddSingleton<
-                    EmployeeRegistrationService>();
-
+                builder.Services.AddSingleton<EmployeeRegistrationService>();
                 builder.Services.AddSingleton<RfidService>();
 
-                // ==========================================
-                // BUILD WEB APPLICATION
-                // ==========================================
-
                 _webApplication = builder.Build();
-
-                // ==========================================
-                // MAP API CONTROLLERS
-                // THIS IS IMPORTANT
-                // ==========================================
-
                 _webApplication.MapControllers();
-
-                // ==========================================
-                // START WEB API
-                // ==========================================
 
                 await _webApplication.StartAsync();
 
-                // ==========================================
-                // GET SAME RFID SERVICE INSTANCE
-                // ==========================================
-
                 var rfidService =
-                    _webApplication.Services
-                        .GetRequiredService<RfidService>();
-
-                // ==========================================
-                // START ALL RFID READERS
-                // ==========================================
+                    _webApplication.Services.GetRequiredService<RfidService>();
 
                 await rfidService.StartAsync();
 
-                // ==========================================
-                // START WPF WINDOW
-                // ==========================================
+                if (_backgroundMode)
+                {
+                    return;
+                }
 
-                var mainWindow =
-                    new MainWindow(rfidService);
-
+                var mainWindow = new MainWindow(rfidService)
+                {
+                    ShowInTaskbar = true
+                };
                 MainWindow = mainWindow;
-
                 mainWindow.Show();
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    ex.ToString(),
-                    "RFID Service Startup Error",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error
-                );
+                if (!_backgroundMode)
+                {
+                    MessageBox.Show(
+                        ex.ToString(),
+                        "RFID Service Startup Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                }
 
                 Shutdown();
             }
         }
 
-        protected override async void OnExit(
-            ExitEventArgs e)
+        protected override async void OnExit(ExitEventArgs e)
         {
             try
             {
                 if (_webApplication != null)
                 {
                     await _webApplication.StopAsync();
-
                     await _webApplication.DisposeAsync();
                 }
             }
