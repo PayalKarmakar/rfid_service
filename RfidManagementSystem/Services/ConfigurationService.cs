@@ -78,4 +78,10 @@ public class ConfigurationService
             ] ?? "10"
         );
     }
+
+    public int GetViolationCheckIntervalSeconds()
+    {
+        return _configuration
+            .GetValue<int>("RfidSettings:ViolationCheckIntervalSeconds");
+    }
 }

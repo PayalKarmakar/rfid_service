@@ -227,6 +227,7 @@ public class RfidTransactionService
                             employee_name,
                             card_uid,
                             entry_time,
+                            entry_reader_id,
                             entry_reader_ip,
                             entry_reader_port,
                             entry_raw_hex_data,
@@ -239,6 +240,7 @@ public class RfidTransactionService
                             @employeeName,
                             @cardUid,
                             NOW(),
+                            @readerId,
                             @readerIp,
                             @readerPort,
                             @rawHexData,
@@ -252,6 +254,7 @@ public class RfidTransactionService
         insertCommand.Parameters.AddWithValue("employeeName", employeeName);
         insertCommand.Parameters.AddWithValue("chamberId",chamberId.Value);
         insertCommand.Parameters.AddWithValue( "cardUid",cardUid);
+        insertCommand.Parameters.AddWithValue("readerId",reader.ReaderId);
         insertCommand.Parameters.AddWithValue( "readerIp", readerIp);
         insertCommand.Parameters.AddWithValue("readerPort",readerPort);
         insertCommand.Parameters.AddWithValue("rawHexData",rawHexData);
@@ -296,6 +299,8 @@ public class RfidTransactionService
             UPDATE public.rfid_transactions
             SET
                 exit_time = NOW(),
+                duration = NOW() - entry_time,
+                exit_reader_id = @readerId,
                 exit_reader_ip = @readerIp,
                 exit_reader_port = @readerPort,
                 exit_raw_hex_data = @rawHexData,
@@ -317,6 +322,11 @@ public class RfidTransactionService
         updateCommand.Parameters.AddWithValue(
             "employeeId",
             employeeId
+        );
+
+        updateCommand.Parameters.AddWithValue(
+            "readerId",
+            reader.ReaderId
         );
 
         updateCommand.Parameters.AddWithValue(

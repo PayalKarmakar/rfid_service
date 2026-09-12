@@ -10,6 +10,7 @@ namespace RfidManagementSystem
     public partial class App : Application
     {
         private WebApplication? _webApplication;
+        private RfidService? _rfidService;
         private bool _backgroundMode;
 
         protected override async void OnStartup(StartupEventArgs e)
@@ -39,17 +40,16 @@ namespace RfidManagementSystem
 
                 await _webApplication.StartAsync();
 
-                var rfidService =
-                    _webApplication.Services.GetRequiredService<RfidService>();
+                _rfidService = _webApplication.Services.GetRequiredService<RfidService>();
 
-                await rfidService.StartAsync();
+                await _rfidService.StartAsync();
 
                 if (_backgroundMode)
                 {
                     return;
                 }
 
-                var mainWindow = new MainWindow(rfidService)
+                var mainWindow = new MainWindow(_rfidService)
                 {
                     ShowInTaskbar = true
                 };
@@ -73,8 +73,15 @@ namespace RfidManagementSystem
 
         protected override async void OnExit(ExitEventArgs e)
         {
+            Console.WriteLine(">>> APP OnExit CALLED");
             try
             {
+                if (_rfidService != null)
+                {
+                    Console.WriteLine(">>> CALLING RFID SERVICE STOP");
+                    _rfidService.Stop();
+                }
+
                 if (_webApplication != null)
                 {
                     await _webApplication.StopAsync();

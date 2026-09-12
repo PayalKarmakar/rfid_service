@@ -1,6 +1,7 @@
 using RfidManagementSystem.Hardware.Rfid;
 using RfidManagementSystem.Models;
 using System;
+using System.Configuration;
 using System.Diagnostics;
 using System.Threading.Tasks;
 
@@ -58,6 +59,11 @@ public class RfidService
 
     private readonly object _employeeRegistrationLock = new();
 
+    private bool _serviceStarted = false;
+    private bool _serviceStopped = false;
+
+    private readonly RfidViolationService _rfidViolationService;
+
     public RfidService(EmployeeRegistrationService employeeRegistrationService)
     {
         _configurationService = new ConfigurationService();
@@ -69,12 +75,30 @@ public class RfidService
         _readerConfigurationService =new RfidReaderConfigurationService(_configurationService);
 
         _employeeRegistrationService = employeeRegistrationService;
+
+        _rfidViolationService = new RfidViolationService(_configurationService,  _systemLogService);
     }
 
     public async Task StartAsync()
     {
         try
         {
+            if (_serviceStarted)
+            {
+                return;
+            }
+
+            _serviceStarted = true;
+
+            await _systemLogService.LogAsync(
+                "RFID_SERVICE",
+                "INFO",
+                "RFID_SERVICE_STARTED",
+                "RFID service started successfully.",
+                null,
+                null
+            );
+
             // Load all active RFID readers dynamically from database
             _activeReaders = await _readerConfigurationService.GetActiveReadersAsync();
 
@@ -97,6 +121,9 @@ public class RfidService
             // Keep reader purpose/IP/active flags in sync with DB
             // so ENTRY <-> EMPLOYEE_REGISTRATION changes apply without restart.
             _ = MonitorReaderConfigurationAsync();
+
+            // Monitor RFID transactions for time-threshold violations
+            _ = MonitorRfidViolationsAsync();
         }
         catch (Exception ex)
         {
@@ -210,9 +237,7 @@ public class RfidService
     /// </summary>
     private async Task MonitorReaderConfigurationAsync()
     {
-        int intervalSeconds = Math.Max(
-            3,
-            _configurationService.GetReaderConfigReloadIntervalSeconds());
+        int intervalSeconds = Math.Max(3,_configurationService.GetReaderConfigReloadIntervalSeconds());
 
         while (true)
         {
@@ -795,6 +820,27 @@ public class RfidService
         }
     }
 
+    private async Task MonitorRfidViolationsAsync()
+    {
+        int intervalSeconds = _configurationService.GetViolationCheckIntervalSeconds();
+
+        while (true)
+        {
+            try
+            {
+                await _rfidViolationService.CheckAndMarkTimeViolationsAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine( $"RFID violation monitor error: {ex}"
+                );
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(intervalSeconds)
+            );
+        }
+    }    
+
     // ==========================================
     // START EMPLOYEE REGISTRATION SCAN
     // ==========================================
@@ -862,6 +908,23 @@ public class RfidService
 
     public void Stop()
     {
+
+        if (_serviceStopped)
+        {
+            return;
+        }
+
+        _serviceStopped = true;
+
+        _ = _systemLogService.LogAsync(
+            "RFID_SERVICE",
+            "INFO",
+            "RFID_SERVICE_STOPPED",
+            "RFID service stopped.",
+            null,
+            null
+        );
+
         foreach (var server in _rfidServers.Values)
         {
             server.Stop();
